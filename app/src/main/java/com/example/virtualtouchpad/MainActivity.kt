@@ -8,6 +8,9 @@ import android.os.Bundle
 import android.os.IBinder
 import android.provider.Settings
 import android.util.Size
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -24,7 +27,8 @@ class MainActivity : ComponentActivity() {
     private var imageAnalysis: ImageAnalysis? = null
     private var handService: HandInputService? = null
     private val REQUEST_CODE_ALL_PERMISSIONS = 100
-
+    private var cameraCalibrated = false
+    private var handCalibrating = false
 
     // 서비스 바인딩 콜백
     private val connection = object : ServiceConnection {
@@ -53,6 +57,9 @@ class MainActivity : ComponentActivity() {
             REQUEST_CODE_ALL_PERMISSIONS
         )
 
+        if (TouchAccessibilityService.instance == null) {
+            openAccessibilitySettings(this)
+        }
 
         if (!Settings.canDrawOverlays(this)) {
             val intent = Intent(
@@ -67,8 +74,46 @@ class MainActivity : ComponentActivity() {
 
         previewView = findViewById(R.id.previewView)
 
+        val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapUp(e: MotionEvent): Boolean {
+                val success = handService?.saveCurrentFrame() ?: false
+                Toast.makeText(this@MainActivity, if (success) "프레임 저장 완료" else "프레임 저장 실패", Toast.LENGTH_SHORT).show()
+                return true
+            }
+
+            override fun onLongPress(e: MotionEvent) {
+                if (!cameraCalibrated) {
+                    val success = handService?.runCalibration() ?: false
+                    if (success) {
+                        cameraCalibrated = true
+                        Toast.makeText(this@MainActivity, "카메라 캘리브레이션 완료", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this@MainActivity, "카메라 캘리브레이션 실패", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    handCalibrating = !handCalibrating
+                    handService?.isCalibrating = handCalibrating
+
+                    if (handCalibrating) {
+                        Toast.makeText(this@MainActivity, "손 캘리브레이션 모드 진입", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(this@MainActivity, "손 캘리브레이션 모드 종료", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+
+        })
+
+        previewView.setOnTouchListener { _, event ->
+            gestureDetector.onTouchEvent(event)
+            true
+        }
+
         val serviceIntent = Intent(this, HandInputService::class.java)
         bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
+
+        val intent = Intent(this, TouchService::class.java)
+        ContextCompat.startForegroundService(this, intent)
     }
 
     // 액티비티 화면 진입 시: 서비스 측 카메라 중지 → 프리뷰 + 분석 시작
@@ -143,5 +188,12 @@ class MainActivity : ComponentActivity() {
         )
         bitmap.copyPixelsFromBuffer(buffer)
         return Bitmap.createBitmap(bitmap, 0, 0, imageProxy.width, imageProxy.height)
+    }
+
+    // 접근성 제어 화면
+    fun openAccessibilitySettings(context: Context) {
+        val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        context.startActivity(intent)
     }
 }
