@@ -54,13 +54,14 @@ class HandInputService : LifecycleService() {
     private val landmarkFilterManager = LandmarkFilterManager(
         freq = 30.0,
         minCutoff = 1.0,
-        beta = 0.0,
+        beta = 5.0,
         dCutoff = 1.0
     )
 
     private var cameraPos: FloatArray? = null
     private var cameraView: FloatArray? = null
-    var isCalibrating = true
+    private var rotationMatrix: FloatArray? = null
+    var isCalibrating = false
 
     // 손끝 좌표 상태 저장용 변수들
     private var isTouching = false
@@ -72,6 +73,8 @@ class HandInputService : LifecycleService() {
     private val longPressThreshold = 600L // ms
 
     private var isPoseValid: Boolean = false
+    private var captureHand: Boolean = false
+    private var frameIdx = 0
 
     // 서비스 생성 시 오버레이와 MediaPipe 초기화
     override fun onCreate() {
@@ -102,10 +105,11 @@ class HandInputService : LifecycleService() {
         val config = bitmap.config ?: Bitmap.Config.ARGB_8888
         lastBitmap = bitmap.copy(config, false)
 
-        NativeLib.estimatePose(lastBitmap!!)?.takeIf { it.size == 6 }?.let { pose ->
+        NativeLib.estimatePose(lastBitmap!!)?.takeIf { it.size == 15 }?.let { pose ->
             isPoseValid = true
             cameraPos = pose.sliceArray(0..2)
             cameraView = pose.sliceArray(3..5)
+            rotationMatrix = pose.sliceArray(6..14)
             Log.d("ArucoPose", "Cam Pos: ${cameraPos?.toList()}, View: ${cameraView?.toList()}")
         } ?: run {
             isPoseValid = false
@@ -115,9 +119,11 @@ class HandInputService : LifecycleService() {
         handLandmarker.detectAsync(mpImage, System.currentTimeMillis())
     }
 
-    fun saveCurrentFrame(): Boolean {
+    fun saveCurrentFrame(type: String): Boolean {
         lastBitmap?.let {
-            val success = NativeLib.saveCalibrationImage(it)
+            var success = true
+            if (type == "camera") success = NativeLib.saveCalibrationImage(it)
+            else if (type == "hand") captureHand = true
             return success
         }
         return false
@@ -125,6 +131,25 @@ class HandInputService : LifecycleService() {
 
     fun runCalibration(): Boolean {
         return NativeLib.calibrateFromSavedImages()
+    }
+
+    fun saveLandmarksToFile(landmarks: List<Landmark>) {
+        if (cameraPos == null || rotationMatrix == null) {
+            Log.e("Calib", "cameraPos or rotationMatrix is null!")
+            return
+        }
+        val folder = filesDir.absolutePath + "/calibration/hand"
+        val dir = File(folder)
+        dir.mkdirs()
+        val filename = File(dir, "frame_%04d.txt".format(frameIdx++))
+        filename.bufferedWriter().use { out ->
+            out.write("%.8f,%.8f,%.8f\n".format(cameraPos!![0], cameraPos!![1], cameraPos!![2]))
+            out.write(rotationMatrix!!.joinToString(",") { "%.8f".format(it) })
+            out.write("\n")
+            landmarks.forEach { lmk ->
+                out.write("%.8f,%.8f\n".format(lmk.u, lmk.v))
+            }
+        }
     }
 
     // MediaPipe HandLandmarker 초기화 및 결과 콜백 처리
@@ -158,8 +183,10 @@ class HandInputService : LifecycleService() {
                     }
                     NativeLib.updateLandmarks(landmarkArray)
 
-                    if (isCalibrating) {
-                        NativeLib.calibrateHand()
+                    if (captureHand && lastBitmap != null && isCalibrating) {
+                        saveLandmarksToFile(filtered)
+                        NativeLib.calibrateHandFromLandmarkFiles()
+                        captureHand = false
                     }
 
                     if (isPoseValid && NativeLib.estimateDepth()) {
@@ -328,5 +355,11 @@ class HandInputService : LifecycleService() {
         }
     }
 
-
+    fun initHandCalibration() {
+        val cachePath = filesDir.absolutePath + "/calibration/hand"
+        val calibrationDir = File(cachePath)
+        calibrationDir.mkdirs()
+        calibrationDir.listFiles()?.forEach { it.delete() }
+        frameIdx = 0
+    }
 }

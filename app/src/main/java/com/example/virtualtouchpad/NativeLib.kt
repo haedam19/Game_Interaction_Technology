@@ -11,10 +11,10 @@ object NativeLib {
     external fun detectArucoMarkers(bitmap: Bitmap): Boolean
     external fun saveCalibrationImage(bitmap: Bitmap): Boolean
     external fun calibrateFromSavedImages(): Boolean
+    external fun calibrateHandFromLandmarkFiles(): Boolean
     external fun loadCalibrationParams(): Boolean
     external fun estimatePose(bitmap: Bitmap): FloatArray?
     external fun updateLandmarks(landmarks: FloatArray)
-    external fun calibrateHand()
     external fun estimateDepth(): Boolean
     external fun estimateIndexTip(): Boolean
     external fun getLandmarkWorld(index: Int): FloatArray

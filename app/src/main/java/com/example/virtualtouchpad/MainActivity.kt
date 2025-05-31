@@ -76,7 +76,9 @@ class MainActivity : ComponentActivity() {
 
         val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapUp(e: MotionEvent): Boolean {
-                val success = handService?.saveCurrentFrame() ?: false
+                var success = false
+                if (!cameraCalibrated) success = handService?.saveCurrentFrame("camera") ?: false
+                else if (handCalibrating) success = handService?.saveCurrentFrame("hand") ?: false
                 Toast.makeText(this@MainActivity, if (success) "프레임 저장 완료" else "프레임 저장 실패", Toast.LENGTH_SHORT).show()
                 return true
             }
@@ -95,6 +97,7 @@ class MainActivity : ComponentActivity() {
                     handService?.isCalibrating = handCalibrating
 
                     if (handCalibrating) {
+                        val success = handService?.initHandCalibration()
                         Toast.makeText(this@MainActivity, "손 캘리브레이션 모드 진입", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(this@MainActivity, "손 캘리브레이션 모드 종료", Toast.LENGTH_SHORT).show()

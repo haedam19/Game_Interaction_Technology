@@ -4,11 +4,13 @@
 #include <android/log.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/aruco.hpp>
+#include <fstream>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "native-lib", __VA_ARGS__)
 
 // 전역 변수
 std::string calibration_cache_dir;
+std::string calibration_cache_hand_dir;
 int saved_image_count = 0;
 cv::aruco::Dictionary dict = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_50);
 cv::aruco::DetectorParameters params;
@@ -18,6 +20,8 @@ bool g_pose_valid = false;
 float g_landmarks[21][3];
 cv::Point3f g_landmarks_world[21];
 std::map<std::string, float> g_landmark_len;
+std::map<std::string, float> landmark_len_sum;
+std::map<std::string, int> landmark_len_count;
 
 // Calibration 경로 초기화
 extern "C"
@@ -25,6 +29,7 @@ JNIEXPORT void JNICALL
 Java_com_example_virtualtouchpad_NativeLib_initCalibrationCache(JNIEnv *env, jobject, jstring path) {
     const char* pathStr = env->GetStringUTFChars(path, nullptr);
     calibration_cache_dir = std::string(pathStr);
+    calibration_cache_hand_dir = calibration_cache_dir + "/hand";
     saved_image_count = 0;
     env->ReleaseStringUTFChars(path, pathStr);
     LOGI("Calibration cache path set: %s", calibration_cache_dir.c_str());
@@ -102,9 +107,11 @@ Java_com_example_virtualtouchpad_NativeLib_calibrateFromSavedImages(JNIEnv *, jo
             {-0.025f, -0.025f, 0},
     };
 
+    cv::Mat img, gray;
+
     // 각 이미지에서 마커 검출 및 저장
     for (const auto& fname : files) {
-        cv::Mat img = cv::imread(fname), gray;
+        img = cv::imread(fname);
         if (img.empty()) continue;
         cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
 
@@ -113,8 +120,10 @@ Java_com_example_virtualtouchpad_NativeLib_calibrateFromSavedImages(JNIEnv *, jo
         std::vector<std::vector<cv::Point2f>> corners;
         detector.detectMarkers(gray, corners, ids);
         for (size_t i = 0; i < ids.size(); ++i) {
-            objPoints.push_back(marker_obj);
-            imgPoints.push_back(corners[i]);
+            if (ids[i] == 0) {
+                objPoints.push_back(marker_obj);
+                imgPoints.push_back(corners[i]);
+            }
         }
     }
     if (objPoints.size() < 5) {
@@ -123,7 +132,7 @@ Java_com_example_virtualtouchpad_NativeLib_calibrateFromSavedImages(JNIEnv *, jo
     }
 
     // 내부 파라미터 추정
-    cv::calibrateCamera(objPoints, imgPoints, cv::Size(640, 480), g_K, g_dist, cv::noArray(), cv::noArray());
+    cv::calibrateCamera(objPoints, imgPoints, img.size(), g_K, g_dist, cv::noArray(), cv::noArray());
     g_Kinv = g_K.inv();
 
     // 결과 저장
@@ -212,13 +221,16 @@ Java_com_example_virtualtouchpad_NativeLib_estimatePose(JNIEnv *env, jobject, jo
                         viewMat.at<double>(2)
                 );
 
-                // Java로 결과 반환
-                jfloatArray result = env->NewFloatArray(6);
+                // 결과 반환
+                jfloatArray result = env->NewFloatArray(15);
                 float data[] = {
                         (float)g_twc.at<double>(0), (float)g_twc.at<double>(1), (float)g_twc.at<double>(2),
-                        (float)view[0], (float)view[1], (float)view[2]
+                        (float)view[0], (float)view[1], (float)view[2],
+                        (float)g_Rwc.at<double>(0,0), (float)g_Rwc.at<double>(0,1), (float)g_Rwc.at<double>(0,2),
+                        (float)g_Rwc.at<double>(1,0), (float)g_Rwc.at<double>(1,1), (float)g_Rwc.at<double>(1,2),
+                        (float)g_Rwc.at<double>(2,0), (float)g_Rwc.at<double>(2,1), (float)g_Rwc.at<double>(2,2)
                 };
-                env->SetFloatArrayRegion(result, 0, 6, data);
+                env->SetFloatArrayRegion(result, 0, 15, data);
                 return result;
             }
         }
@@ -276,54 +288,109 @@ cv::Point3f intersectRayWithPlane(const cv::Point3f& cam_pos, const cv::Point3f&
     return cam_pos + dir * t;
 }
 
-// 손 3D 위치 및 각 관절 간 거리 캘리브레이션
-extern "C"
-JNIEXPORT void JNICALL
-Java_com_example_virtualtouchpad_NativeLib_calibrateHand(JNIEnv *, jobject) {
-    if (!g_pose_valid) return;
+// 랜드마크 좌표 파일에서 g_landmarks 세팅
+bool loadLandmarksFromFile(const std::string& filename,
+                           cv::Point3f& cam_pos,
+                           cv::Mat& rotation,
+                           float landmarks[21][2]) {
+    std::ifstream in(filename);
+    if (!in.is_open()) return false;
 
-    // 2D 좌표에서 평면에 투영하여 3D 위치 추정
-    for (int i = 0; i < 21; ++i) {
-        float u = g_landmarks[i][0];
-        float v = g_landmarks[i][1];
-        cv::Mat uv = (cv::Mat_<double>(3, 1) << u, v, 1.0);
-        cv::Mat ray_cam = g_Kinv * uv;
-        ray_cam /= cv::norm(ray_cam);
-        cv::Mat ray_world = g_Rwc * ray_cam;
-        cv::Point3f dir(ray_world.at<double>(0), ray_world.at<double>(1), ray_world.at<double>(2));
-        g_landmarks_world[i] = intersectRayWithPlane(cv::Point3f(
-                g_twc.at<double>(0),
-                g_twc.at<double>(1),
-                g_twc.at<double>(2)
-        ), dir);
+    float camX, camY, camZ;
+    char comma;
+    if (!(in >> camX >> comma >> camY >> comma >> camZ)) return false;
+    cam_pos = cv::Point3f(camX, camY, camZ);
+
+    rotation = cv::Mat(3, 3, CV_64F);
+    for (int i = 0; i < 9; ++i) {
+        double val;
+        if (!(in >> val)) return false;
+        if (i < 8) in >> comma;
+        rotation.at<double>(i / 3, i % 3) = val;
     }
 
-    // 거리 계산
-    auto calcDist = [](const cv::Point3f& a, const cv::Point3f& b) {
-        return cv::norm(a - b);
-    };
+    for (int i = 0; i < 21; ++i) {
+        float u, v;
+        if (!(in >> u >> comma >> v)) return false;
+        landmarks[i][0] = u;
+        landmarks[i][1] = v;
+    }
+    return true;
+}
 
-    auto saveLen = [&](int a, int b) {
-        char key[8];
-        snprintf(key, sizeof(key), "%d-%d", a, b);
-        float len = calcDist(g_landmarks_world[a], g_landmarks_world[b]);
-        if (g_landmark_len.count(key) == 0 || g_landmark_len[key] == 0) {
-            g_landmark_len[key] = len;
-        } else {
-            g_landmark_len[key] = (g_landmark_len[key] + len) / 2;
+
+// 손 캘리브레이션
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_virtualtouchpad_NativeLib_calibrateHandFromLandmarkFiles(JNIEnv *, jobject) {
+    std::vector<cv::String> files;
+    cv::glob(calibration_cache_hand_dir + "/*.txt", files);
+
+    landmark_len_sum.clear();
+    landmark_len_count.clear();
+
+    int validCount = 0;
+    for (const auto& lmkPath : files) {
+        cv::Point3f cam_pos;
+        cv::Mat rotation;
+        float landmarks[21][2];
+        if (!loadLandmarksFromFile(lmkPath, cam_pos, rotation, landmarks)) {
+            LOGI("Failed to load landmark file: %s", lmkPath.c_str());
+            continue;
         }
-    };
 
-    // 거리 등록
-    saveLen(0, 1); saveLen(1, 2); saveLen(2, 3); saveLen(3, 4);
-    saveLen(0, 5); saveLen(0, 9); saveLen(0, 17);
-    saveLen(5, 9); saveLen(9, 13); saveLen(13, 17);
-    saveLen(5, 6); saveLen(6, 7); saveLen(7, 8);
-    saveLen(9, 10); saveLen(10, 11); saveLen(11, 12);
-    saveLen(13, 14); saveLen(14, 15); saveLen(15, 16);
-    saveLen(17, 18); saveLen(18, 19); saveLen(19, 20);
+        cv::Mat Kinv = g_Kinv.clone();
+        cv::Mat Rwc = rotation;
+        cv::Point3f twc = cam_pos;
 
-    LOGI("Hand calibration complete.");
+        // 위치 추정
+        for (int i = 0; i < 21; ++i) {
+            float u = landmarks[i][0];
+            float v = landmarks[i][1];
+            cv::Mat uv = (cv::Mat_<double>(3, 1) << u, v, 1.0);
+            cv::Mat ray_cam = Kinv * uv;
+            ray_cam /= cv::norm(ray_cam);
+            cv::Mat ray_world = Rwc * ray_cam;
+            cv::Point3f dir(ray_world.at<double>(0), ray_world.at<double>(1), ray_world.at<double>(2));
+            g_landmarks_world[i] = intersectRayWithPlane(twc, dir);
+        }
+
+        auto calcDist = [](const cv::Point3f& a, const cv::Point3f& b) {
+            return cv::norm(a - b);
+        };
+        auto saveLen = [&](int a, int b) {
+            char key[8];
+            snprintf(key, sizeof(key), "%d-%d", a, b);
+            float len = calcDist(g_landmarks_world[a], g_landmarks_world[b]);
+            if (landmark_len_count[key] == 0) {
+                landmark_len_sum[key] = len;
+            } else {
+                landmark_len_sum[key] = (landmark_len_sum[key] + len) / 2.0f;
+            }
+            landmark_len_count[key] += 1;
+        };
+        saveLen(0, 1); saveLen(1, 2); saveLen(2, 3); saveLen(3, 4);
+        saveLen(0, 5); saveLen(0, 9); saveLen(0, 17);
+        saveLen(5, 9); saveLen(9, 13); saveLen(13, 17);
+        saveLen(5, 6); saveLen(6, 7); saveLen(7, 8);
+        saveLen(9, 10); saveLen(10, 11); saveLen(11, 12);
+        saveLen(13, 14); saveLen(14, 15); saveLen(15, 16);
+        saveLen(17, 18); saveLen(18, 19); saveLen(19, 20);
+
+        ++validCount;
+    }
+
+    if (validCount == 0) {
+        LOGI("No valid landmark file processed");
+        return JNI_FALSE;
+    }
+
+    for (const auto& p : landmark_len_sum) {
+        g_landmark_len[p.first] = p.second;
+    }
+
+    LOGI("Hand calibration from %d landmark files complete.", validCount);
+    return JNI_TRUE;
 }
 
 std::vector<cv::Point3f> findPointsOnRay(
@@ -455,34 +522,35 @@ bool estimateLandmarkFromBase(int baseIdx, int targetIdx) {
 
     float u = g_landmarks[targetIdx][0];
     float v = g_landmarks[targetIdx][1];
-    float depth = g_landmarks[targetIdx][2];
+    float z_target = g_landmarks[targetIdx][2];
+    float z_base   = g_landmarks[baseIdx][2];
 
-    // 이미지 좌표 → 카메라 → 월드 방향 벡터
     cv::Mat uv = (cv::Mat_<double>(3, 1) << u, v, 1.0);
     cv::Mat ray_cam = g_Kinv * uv;
     ray_cam /= cv::norm(ray_cam);
     cv::Mat ray_world = g_Rwc * ray_cam;
     cv::Point3f ray(ray_world);
 
-    // 구 중심 및 반지름 설정
     cv::Point3f origin(g_twc);
     cv::Point3f center = g_landmarks_world[baseIdx];
 
-    // 길이
     char key[8];
-    snprintf(key, sizeof(key), "%d-%d", std::min(baseIdx, targetIdx), std::max(baseIdx, targetIdx));
+    snprintf(key, sizeof(key), "%d-%d",
+             std::min(baseIdx, targetIdx),
+             std::max(baseIdx, targetIdx));
     float radius = g_landmark_len[key];
 
     auto candidates = intersectRaySphere(center, radius, origin, ray);
-
     if (candidates.empty()) return false;
 
     if (candidates.size() == 1) {
         g_landmarks_world[targetIdx] = candidates[0];
     } else {
-        float dot0 = (candidates[0] - origin).dot(ray);
-        float dot1 = (candidates[1] - origin).dot(ray);
-        g_landmarks_world[targetIdx] = (dot1 > dot0) ? candidates[1] : candidates[0];
+        if (z_target > z_base) {
+            g_landmarks_world[targetIdx] = candidates[1];
+        } else {
+            g_landmarks_world[targetIdx] = candidates[0];
+        }
     }
 
     return true;
