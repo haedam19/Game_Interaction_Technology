@@ -2,6 +2,7 @@ package com.example.virtualtouchpad
 
 import android.app.*
 import android.content.*
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -34,7 +35,16 @@ class TouchService : Service() {
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .build()
 
-        startForeground(1, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                1,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            startForeground(1, notification)
+        }
     }
 
     private val receiver = object : BroadcastReceiver() {
