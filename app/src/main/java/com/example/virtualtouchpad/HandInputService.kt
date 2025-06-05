@@ -256,7 +256,11 @@ class HandInputService : LifecycleService() {
             PixelFormat.TRANSLUCENT
         )
 
-        windowManager.addView(pointerOverlay, params)
+        try {
+            windowManager.addView(pointerOverlay, params)
+        } catch (e: SecurityException) {
+            Log.e("HandInputService", "Failed to add overlay view", e)
+        }
     }
 
     // 서비스가 카메라 직접 실행 (앱 백그라운드일 때
