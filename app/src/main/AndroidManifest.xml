@@ -42,7 +42,8 @@
         <!-- 좌표 수신 후 Touch 수행 서비스 -->
         <service
             android:name=".TouchService"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <activity android:name=".MainActivity"
             android:theme="@style/Theme.Transparent"
